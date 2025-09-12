@@ -1,21 +1,37 @@
-#!/usr/bin/env python
-
 import numpy as np
 from scipy.spatial.transform import Rotation
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.qos import (QoSProfile,
+                       ReliabilityPolicy,
+                       HistoryPolicy,
+                       DurabilityPolicy)
 
-from geometry_msgs.msg import  Vector3Stamped, PoseStamped, TwistStamped, AccelStamped, Point
+from geometry_msgs.msg import (Vector3Stamped,
+                               PoseStamped,
+                               TwistStamped,
+                               AccelStamped,
+                               Point,
+                               TransformStamped)
 from visualization_msgs.msg import Marker
 from nav_msgs.msg import Path
 from std_msgs.msg import Float32
+from tf2_ros import TransformBroadcaster
 
 
-from traj_gen.traj_gen.min_snap_trajectory_generators import xyzMinDerivTrajectory, xyzMinSnapTrajectory, optimizeTrajectory, YawMinAccTrajectory
+from traj_gen.traj_gen.min_snap_trajectory_generators import (xyzMinDerivTrajectory,
+                                                              xyzMinSnapTrajectory,
+                                                              optimizeTrajectory,
+                                                              YawMinAccTrajectory)
 from traj_gen.traj_gen.trajectory_generators import YawTrajectory
-from traj_gen.waypoints import flip, figure_8, long_waypoint, test_position, straight, att_test, raster_scan
+from traj_gen.waypoints import (flip,
+                                figure_8,
+                                long_waypoint,
+                                test_position,
+                                straight,
+                                att_test,
+                                raster_scan)
 
 
 class MinSnapTrajectoryGenerator(Node):
@@ -24,188 +40,204 @@ class MinSnapTrajectoryGenerator(Node):
     """
     def __init__(self):
         super().__init__('trajectory_generator')
-        
+
         # setpoints publishers
-        self.att_sp_rpy_pub = self.create_publisher(Vector3Stamped,'/target_att_rpy', 10) # att in rpy degrees
-        self.pose_sp_pub = self.create_publisher(PoseStamped,'/target_pose', 10)  # pose (xyz and quaternion)     
-        self.vel_sp_pub = self.create_publisher(TwistStamped,'/target_twist', 10) # linear and angular velocity
-        self.acc_sp_pub = self.create_publisher(AccelStamped,'/target_accel', 10) # linear and angular acceleration
-        self.jerk_sp_pub = self.create_publisher(Vector3Stamped,'/target_jerk', 10) # linear jerk
-        self.snap_sp_pub = self.create_publisher(Vector3Stamped,'/target_snap', 10) # linear snap
-        self.force_sp_pub = self.create_publisher(Float32,'/target_force', 10)
+        self.att_sp_rpy_pub = self.create_publisher(Vector3Stamped, '/target_att_rpy', 10)  # att in rpy degrees
+        self.pose_sp_pub = self.create_publisher(PoseStamped, '/target_pose', 10)   # pose (xyz and quaternion)
+        self.vel_sp_pub = self.create_publisher(TwistStamped, '/target_twist', 10)  # linear and angular velocity
+        self.acc_sp_pub = self.create_publisher(AccelStamped, '/target_accel', 10)  # linear and angular acceleration
+        self.jerk_sp_pub = self.create_publisher(Vector3Stamped, '/target_jerk', 10)  # linear jerk
+        self.snap_sp_pub = self.create_publisher(Vector3Stamped, '/target_snap', 10)  # linear snap
+        self.force_sp_pub = self.create_publisher(Float32, '/target_force', 10)
         # self.wrench_sp_pub = self.create_publisher(WrenchStamped,'/target_wrench', 10)
 
         # state subscribers (used by some traj generators such as yaw follower)
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            history=HistoryPolicy.KEEP_LAST,    depth=1)
-        self.att_rpy_sub = self.create_subscription(Vector3Stamped,'/att_rpy', self.rpy_callback, qos_profile)
-        self.position_sub = self.create_subscription(Vector3Stamped,'/position', self.position_callback, qos_profile)
-        self.cur_position = np.array([0.0,0.0,0.0])
-        self.cur_rpy = np.array([0.0,0.0,0.0])
-        
-        # trajectory visualization in rviz 
+            history=HistoryPolicy.KEEP_LAST, depth=1)
+        self.att_rpy_sub = self.create_subscription(Vector3Stamped, '/att_rpy', self.rpy_callback, qos_profile)
+        self.position_sub = self.create_subscription(Vector3Stamped, '/position', self.position_callback, qos_profile)
+        self.cur_position = np.array([0.0, 0.0, 0.0])
+        self.cur_rpy = np.array([0.0, 0.0, 0.0])
+
+        # trajectory visualization in rviz
         self.waypoints_pub = self.create_publisher(Path, "/traj_gen/waypoints", 10)
         self.full_path_pub = self.create_publisher(Path, "/traj_gen/full_path", 10)
         self.timed_path_pub = self.create_publisher(Path, "/traj_gen/path", 10)
         self.vel_arrows_pub = self.create_publisher(Marker, "/traj_gen/vel_arrows", 10)
 
+        self.frame_id_param = self.declare_parameter('frame_id', 'traj_gen')
+        self.child_frame_id_param = self.declare_parameter('child_frame_id', 'traj_gen_node')
+
+        self.transform_broadcaster = TransformBroadcaster(node=Node('traj_gen_tf_broadcaster'))
+
         self.xyz_waypoints = []
         self.rpy_waypoints = []
         self.waypoints_t = []
         # for rviz visualization
-        self.position_path_msg = Path() # plot trajectory
-        self.position_path_msg.header.frame_id = "map"
-        self.trail_size = 1000 # maximum history to keep
+        self.position_path_msg = Path()  # plot trajectory
+        self.position_path_msg.header.frame_id = self.frame_id
+        self.trail_size = 1000  # maximum history to keep
         self.vel_heads = []
         self.vel_tails = []
-
 
         # ================ choose which trajectory to use ========================
         # TODO use rqt_reconfigure to choose trajectory and ensure smooth transitions
         self.traj_type = 'min_snap'
-        self.yaw_type = 'min_acc' # yaw_type: 'zeros', 'timed', 'interp', 'follow', 'min_acc'
-        self.roll_pitch_type = 'min_acc' # None or 'min_acc'
+        self.yaw_type = 'min_acc'  # yaw_type: 'zeros', 'timed', 'interp', 'follow', 'min_acc'
+        self.roll_pitch_type = 'min_acc'  # None or 'min_acc'
         self.current_yaw = 0.0
         # load waypoints (xyz, yaw)
         t_waypoints, self.xyz_waypoints, self.rpy_waypoints = figure_8()
-        roll_waypoints = self.rpy_waypoints[:,0]
-        pitch_waypoints = self.rpy_waypoints[:,1]
-        yaw_waypoints = self.rpy_waypoints[:,2]
+        roll_waypoints = self.rpy_waypoints[:, 0]
+        pitch_waypoints = self.rpy_waypoints[:, 1]
+        yaw_waypoints = self.rpy_waypoints[:, 2]
         # ========================================================================
 
         # yaw generator
         if self.yaw_type in ['zeros', 'timed', 'interp', 'follow']:
-            self.yaw_gen = YawTrajectory(yaw_waypoints=yaw_waypoints,t_waypoints=t_waypoints[:], yaw_type=self.yaw_type,current_yaw=self.current_yaw)
-        elif self.yaw_type =='min_acc':
-            self.yaw_gen = YawMinAccTrajectory(yaw_waypoints=yaw_waypoints,t_waypoints=t_waypoints)
+            self.yaw_gen = YawTrajectory(yaw_waypoints=yaw_waypoints,
+                                         t_waypoints=t_waypoints[:],
+                                         yaw_type=self.yaw_type,
+                                         current_yaw=self.current_yaw)
+        elif self.yaw_type == 'min_acc':
+            self.yaw_gen = YawMinAccTrajectory(yaw_waypoints=yaw_waypoints,
+                                               t_waypoints=t_waypoints)
         else:
             raise ValueError(f"Yaw trajectory type ({self.yaw_type}) is not supported!")
- 
+
         if self.roll_pitch_type is not None:
-            self.roll_gen = YawMinAccTrajectory(yaw_waypoints=roll_waypoints,t_waypoints=t_waypoints)
-            self.pitch_gen = YawMinAccTrajectory(yaw_waypoints=pitch_waypoints,t_waypoints=t_waypoints)
+            self.roll_gen = YawMinAccTrajectory(yaw_waypoints=roll_waypoints,
+                                                t_waypoints=t_waypoints)
+            self.pitch_gen = YawMinAccTrajectory(yaw_waypoints=pitch_waypoints,
+                                                 t_waypoints=t_waypoints)
         else:
             self.roll_gen = None
             self.pitch_gen = None
-    
+
         # XYZ generator
         if self.traj_type == 'min_snap':
             self.xyz_gen = xyzMinDerivTrajectory(xyz_waypoints=self.xyz_waypoints, t_waypoints=t_waypoints, traj_type=4)
             print(f"{self.xyz_gen.coeff_x.round(3)}")
             print(f"{self.xyz_gen.coeff_y.round(3)}")
             print(f"{self.xyz_gen.coeff_z.round(3)}")
-       
+
         elif self.traj_type == 'min_snap2':
-            self.xyz_gen = xyzMinSnapTrajectory(xyz_waypoints=self.xyz_waypoints, t_waypoints=t_waypoints, vel=None, calc_times=False, method='lstsq')
+            self.xyz_gen = xyzMinSnapTrajectory(xyz_waypoints=self.xyz_waypoints,
+                                                t_waypoints=t_waypoints,
+                                                vel=None,
+                                                calc_times=False,
+                                                method='lstsq')
             print(f"{self.xyz_gen.coeffs[:,0].round(3)}")
             print(f"{self.xyz_gen.coeffs[:,1].round(3)}")
             print(f"{self.xyz_gen.coeffs[:,2].round(3)}")
-                
+
         elif self.traj_type == 'optimize_traj':
-            #'end-derivative' 'poly-coeff'
-            self.xyz_gen = optimizeTrajectory(self.xyz_waypoints, t_waypoints, optim_target='poly-coeff',poly_order=7, floating_cubes=None, t_cubes=None)
+            # 'end-derivative' 'poly-coeff'
+            self.xyz_gen = optimizeTrajectory(self.xyz_waypoints,
+                                              t_waypoints,
+                                              optim_target='poly-coeff',
+                                              poly_order=7,
+                                              floating_cubes=None,
+                                              t_cubes=None)
             # print(f"{self.xyz_gen.traj_gen.polyCoeffSet.round(2)}") # [dimension, [seg1;seg2;..]]
 
         else:
             raise ValueError(f"Trajectory type ({self.traj_type}) is not supported!")
-            
-  
+
         update_freq = 100.0  # hz
         self.start_time = self.get_clock().now().nanoseconds
         self.prev_time = 0.0
-        self.update_callback_timer = self.create_timer(1.0/update_freq,self.update_callback)
+        self.update_callback_timer = self.create_timer(1.0 / update_freq, self.update_callback)
 
         # publish waypoints only once (if available)
-        waypoints_msgs = Path() # plot trajectory
-        waypoints_msgs.header.frame_id = "map"
+        waypoints_msgs = Path()  # plot trajectory
+        waypoints_msgs.header.frame_id = self.frame_id
         for position, att_rpy in zip(self.xyz_waypoints, self.rpy_waypoints):
             q_tmp = Rotation.from_euler(
-                'XYZ',[att_rpy[0], att_rpy[1], att_rpy[2]]).as_quat()
+                'XYZ', [att_rpy[0], att_rpy[1], att_rpy[2]]).as_quat()
             q = np.zeros(4)
-            q[0],q[1], q[2], q[3] = q_tmp[3], q_tmp[0], q_tmp[1], q_tmp[2]
+            q[0], q[1], q[2], q[3] = q_tmp[3], q_tmp[0], q_tmp[1], q_tmp[2]
             pose_msg = PoseStamped()
-            pose_msg.header.frame_id = 'map'
+            pose_msg.header.frame_id = self.frame_id
             pose_msg.pose.position.x = position[0]
             pose_msg.pose.position.y = position[1]
             pose_msg.pose.position.z = position[2]
             pose_msg.pose.orientation.w = q[0]
             pose_msg.pose.orientation.x = q[1]
             pose_msg.pose.orientation.y = q[2]
-            pose_msg.pose.orientation.z = q[3]        
+            pose_msg.pose.orientation.z = q[3]
             waypoints_msgs.poses.append(pose_msg)
             self.waypoints_pub.publish(waypoints_msgs)
 
-
     def update_callback(self) -> None:
-        """Callback function for the timer that runs the trajectory update at desired rate"""           
-        t = (self.get_clock().now().nanoseconds - self.start_time) /1000_000_000.0 # time since the beginning in seconds
-        dt = (t - self.prev_time) # time since last update
+        """Callback function for the timer that runs the trajectory update at desired rate"""
+        t = (self.get_clock().now().nanoseconds - self.start_time) / 1000_000_000.0  # time since the beginning in seconds
+        dt = (t - self.prev_time)  # time since last update
         self.prev_time = t
 
         # holders
-        position,vel,att_q, att_rpy, = None, None, None, None
-        
-        
+        position, vel, _, att_rpy, = None, None, None, None
+
         if self.traj_type == 'min_snap' or self.traj_type == 'min_snap2' or self.traj_type == 'optimize_traj':
             # update translational motion
-            position, vel, acc, jerk, snap  = self.xyz_gen.eval(t)
+            position, vel, acc, jerk, snap = self.xyz_gen.eval(t)
             # update rotational motions
-            des_yaw, des_yaw_rate, des_yaw_acc = self.yaw_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
+            des_yaw, _, _ = self.yaw_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
             if self.roll_gen is not None and self.pitch_gen is not None:
-                des_roll, des_roll_rate, des_roll_acc = self.roll_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
-                des_pitch, des_pitch_rate, des_pitch_acc = self.pitch_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
+                des_roll, _, _ = self.roll_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
+                des_pitch, _, _ = self.pitch_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
             else:
                 des_roll = 0.0
                 des_pitch = 0.0
             att_rpy = np.array([des_roll, des_pitch, des_yaw])
-            self.get_logger().info(f"publishing commands: att={att_rpy.round(3)}, position={position.round(3)}", throttle_duration_sec=0.5)        
-            pose_msg = self.pub_pose_cmd(position, att_rpy)
-            rpy_msg = self.pub_rpy_cmd(att_rpy)
+            self.get_logger().info(f"publishing commands: att={att_rpy.round(3)}, position={position.round(3)}",
+                                   throttle_duration_sec=0.5)
+            self.pub_pose_cmd(position, att_rpy)
+            self.pub_transform_broadcaster(position, att_rpy)
+            self.pub_rpy_cmd(att_rpy)
             self.pub_linear_twist_cmd(vel)
             self.pub_linear_accel_cmd(acc)
             self.pub_linear_jerk_cmd(jerk)
             self.pub_linear_snap_cmd(snap)
 
-
         # ====== Publish trajectory visualization  ==========
         if position is not None and att_rpy is not None:
-            self.pub_traj_path(position,att_rpy)
+            self.pub_traj_path(position, att_rpy)
             # Publish arrow markers for velocity if available
             if vel is not None:
-                self.pub_vel_arrows(1,position,vel,dt)
+                self.pub_vel_arrows(1, position, vel, dt)
 
-
-    def rpy_callback(self,msg: Vector3Stamped) -> None:
+    def rpy_callback(self, msg: Vector3Stamped) -> None:
         self.cur_rpy = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
 
-    def position_callback(self,msg: Vector3Stamped) -> None:
+    def position_callback(self, msg: Vector3Stamped) -> None:
         self.cur_position = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
-        
-    def pub_rpy_cmd(self,sig:np.array) -> Vector3Stamped:
+
+    def pub_rpy_cmd(self, sig: np.array) -> Vector3Stamped:
         # publish trajectory attitude in rpy representation in degrees
         # timestamp = int(self.get_clock().now().nanoseconds / 1000)
         rpy_msg = Vector3Stamped()
-        rpy_msg.header.frame_id = 'map'
+        rpy_msg.header.frame_id = self.frame_id
         rpy_msg.vector.x = np.rad2deg(sig[0])
         rpy_msg.vector.y = np.rad2deg(sig[1])
         rpy_msg.vector.z = np.rad2deg(sig[2])
         self.att_sp_rpy_pub.publish(rpy_msg)
         return rpy_msg
-    
-    def pub_linear_twist_cmd(self, linear_vel:np.array) ->TwistStamped:
+
+    def pub_linear_twist_cmd(self, linear_vel: np.array) -> TwistStamped:
         vel_msg = TwistStamped()
-        vel_msg.header.frame_id = 'map'
+        vel_msg.header.frame_id = self.frame_id
         vel_msg.twist.linear.x = linear_vel[0]
         vel_msg.twist.linear.y = linear_vel[1]
         vel_msg.twist.linear.z = linear_vel[2]
         self.vel_sp_pub.publish(vel_msg)
         return vel_msg
 
-    def pub_full_twist_cmd(self, linear_vel:np.array, angular_vel:np.array) ->TwistStamped:
+    def pub_full_twist_cmd(self, linear_vel: np.array, angular_vel: np.array) -> TwistStamped:
         vel_msg = TwistStamped()
-        vel_msg.header.frame_id = 'map'
+        vel_msg.header.frame_id = self.frame_id
         vel_msg.twist.linear.x = linear_vel[0]
         vel_msg.twist.linear.y = linear_vel[1]
         vel_msg.twist.linear.z = linear_vel[2]
@@ -215,19 +247,19 @@ class MinSnapTrajectoryGenerator(Node):
 
         self.vel_sp_pub.publish(vel_msg)
         return vel_msg
- 
-    def pub_linear_accel_cmd(self, linear_acc:np.array) ->AccelStamped:
+
+    def pub_linear_accel_cmd(self, linear_acc: np.array) -> AccelStamped:
         acc_msg = AccelStamped()
-        acc_msg.header.frame_id = 'map'
+        acc_msg.header.frame_id = self.frame_id
         acc_msg.accel.linear.x = linear_acc[0]
         acc_msg.accel.linear.y = linear_acc[1]
         acc_msg.accel.linear.z = linear_acc[2]
         self.acc_sp_pub.publish(acc_msg)
         return acc_msg
- 
-    def pub_full_accel_cmd(self, linear_acc:np.array, angular_acc:np.array) ->AccelStamped:
+
+    def pub_full_accel_cmd(self, linear_acc: np.array, angular_acc: np.array) -> AccelStamped:
         acc_msg = AccelStamped()
-        acc_msg.header.frame_id = 'map'
+        acc_msg.header.frame_id = self.frame_id
         acc_msg.accel.linear.x = linear_acc[0]
         acc_msg.accel.linear.y = linear_acc[1]
         acc_msg.accel.linear.z = linear_acc[2]
@@ -236,36 +268,36 @@ class MinSnapTrajectoryGenerator(Node):
         acc_msg.accel.angular.z = angular_acc[2]
 
         self.acc_sp_pub.publish(acc_msg)
-        return acc_msg   
+        return acc_msg
 
-    def pub_linear_jerk_cmd(self, linear_jerk:np.array) ->Vector3Stamped:
+    def pub_linear_jerk_cmd(self, linear_jerk: np.array) -> Vector3Stamped:
         msg = Vector3Stamped()
-        msg.header.frame_id = 'map'
+        msg.header.frame_id = self.frame_id
         msg.vector.x = linear_jerk[0]
         msg.vector.y = linear_jerk[1]
         msg.vector.z = linear_jerk[2]
         self.jerk_sp_pub.publish(msg)
         return msg
- 
-    def pub_linear_snap_cmd(self, linear_snap:np.array) ->Vector3Stamped:
+
+    def pub_linear_snap_cmd(self, linear_snap: np.array) -> Vector3Stamped:
         msg = Vector3Stamped()
-        msg.header.frame_id = 'map'
+        msg.header.frame_id = self.frame_id
         msg.vector.x = linear_snap[0]
         msg.vector.y = linear_snap[1]
         msg.vector.z = linear_snap[2]
         self.snap_sp_pub.publish(msg)
         return msg
-     
-    def pub_pose_cmd(self,position:np.array,rpy:np.array) -> PoseStamped:
+
+    def pub_pose_cmd(self, position: np.array, rpy: np.array) -> PoseStamped:
         q_tmp = Rotation.from_euler(
-            'XYZ',[rpy[0], rpy[1], rpy[2]]).as_quat()
+            'XYZ', [rpy[0], rpy[1], rpy[2]]).as_quat()
         q = np.zeros(4)
         q[0] = q_tmp[3]
         q[1] = q_tmp[0]
         q[2] = q_tmp[1]
         q[3] = q_tmp[2]
         msg = PoseStamped()
-        msg.header.frame_id = 'map'
+        msg.header.frame_id = self.frame_id
         msg.pose.position.x = position[0]
         msg.pose.position.y = position[1]
         msg.pose.position.z = position[2]
@@ -275,20 +307,20 @@ class MinSnapTrajectoryGenerator(Node):
         msg.pose.orientation.z = q[3]
         self.pose_sp_pub.publish(msg)
         return msg
-        
-    def pub_force_cmd(self, force:float) ->None:
+
+    def pub_force_cmd(self, force: float) -> None:
         msg = Float32()
         msg.data = force
-        self.force_sp_pub.publish(msg)    
+        self.force_sp_pub.publish(msg)
         return msg
 
     def pub_traj_path(self, position, att_rpy):
         q_tmp = Rotation.from_euler(
-            'XYZ',[att_rpy[0], att_rpy[1], att_rpy[2]]).as_quat()
+            'XYZ', [att_rpy[0], att_rpy[1], att_rpy[2]]).as_quat()
         q = np.zeros(4)
-        q[0],q[1],q[2],q[3]  = q_tmp[3], q_tmp[0], q_tmp[1], q_tmp[2]
+        q[0], q[1], q[2], q[3] = q_tmp[3], q_tmp[0], q_tmp[1], q_tmp[2]
         pose_msg = PoseStamped()
-        pose_msg.header.frame_id = 'map'
+        pose_msg.header.frame_id = self.frame_id
         pose_msg.pose.position.x = position[0]
         pose_msg.pose.position.y = position[1]
         pose_msg.pose.position.z = position[2]
@@ -298,10 +330,10 @@ class MinSnapTrajectoryGenerator(Node):
         pose_msg.pose.orientation.z = q[3]
         self.position_path_msg.poses.append(pose_msg)
         if len(self.position_path_msg.poses) > self.trail_size:
-            del self.position_path_msg.poses[0]  
+            del self.position_path_msg.poses[0]
         self.timed_path_pub.publish(self.position_path_msg)
 
-    def pub_vel_arrows(self,id,position,vel,dt):
+    def pub_vel_arrows(self, id, position, vel, dt):
         # append position to the tails array and limit array size
         tail_point = Point()
         tail_point.x = position[0]
@@ -309,21 +341,21 @@ class MinSnapTrajectoryGenerator(Node):
         tail_point.z = position[2]
         self.vel_tails.append(tail_point)
         if len(self.vel_tails) > self.trail_size:
-            del self.vel_tails[0]  
+            del self.vel_tails[0]
 
         # append position to the heads array and limit array size
-        head = position+vel*dt
+        head = position + vel * dt
         head_point = Point()
         head_point.x = head[0]
         head_point.y = head[1]
         head_point.z = head[2]
         self.vel_heads.append(head_point)
         if len(self.vel_heads) > self.trail_size:
-            del self.vel_heads[0]  
-        
+            del self.vel_heads[0]
+
         msg = Marker()
         msg.action = Marker.ADD
-        msg.header.frame_id = "map"
+        msg.header.frame_id = self.frame_id
         msg.ns = "arrows"
         msg.id = id
         msg.type = Marker.LINE_LIST
@@ -334,15 +366,42 @@ class MinSnapTrajectoryGenerator(Node):
         msg.color.g = 0.2
         msg.color.b = 0.4
         msg.color.a = 0.9
-        for tail,head in zip(self.vel_tails,self.vel_heads):
+        for tail, head in zip(self.vel_tails, self.vel_heads):
             msg.points.append(tail)
             msg.points.append(head)
         self.vel_arrows_pub.publish(msg)
-  
-    def create_points_marker(self, id, points, color=[0.5, 0.5, 0.0, 1.0], scale=[0.4,0.4,0.0]):
+
+    def pub_transform_broadcaster(self, position: np.ndarray, rpy: np.ndarray) -> None:
+        q_tmp = Rotation.from_euler(
+            'XYZ', [rpy[0], rpy[1], rpy[2]]
+        ).as_quat()
+        q = np.zeros(4)
+        q[0] = q_tmp[3]
+        q[1] = q_tmp[0]
+        q[2] = q_tmp[1]
+        q[3] = q_tmp[2]
+        msg = TransformStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.frame_id
+        msg.child_frame_id = self.child_frame_id
+        msg.transform.translation.x = position[0]
+        msg.transform.translation.y = position[1]
+        msg.transform.translation.z = position[2]
+        msg.transform.rotation.w = q[0]
+        msg.transform.rotation.x = q[1]
+        msg.transform.rotation.y = q[2]
+        msg.transform.rotation.z = q[3]
+
+        self.transform_broadcaster.sendTransform(msg)
+
+    def create_points_marker(self,
+                             id,
+                             points,
+                             color=[0.5, 0.5, 0.0, 1.0],
+                             scale=[0.4, 0.4, 0.0]):
         msg = Marker()
         msg.action = Marker.ADD
-        msg.header.frame_id = "map"
+        msg.header.frame_id = self.frame_id
         msg.ns = "points"
         msg.id = id
         msg.type = Marker.SPHERE_LIST
@@ -360,7 +419,16 @@ class MinSnapTrajectoryGenerator(Node):
             p.z = point[2]
             msg.points.append(p)
         return msg
-            
+
+    @property
+    def frame_id(self) -> str:
+        return self.get_parameter('frame_id').value
+
+    @property
+    def child_frame_id(self) -> str:
+        return self.get_parameter('child_frame_id').value
+
+
 def main(args=None):
     """Main function to execute"""
     rclpy.init(args=args)
