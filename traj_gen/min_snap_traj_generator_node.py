@@ -160,7 +160,7 @@ class MinSnapTrajectoryGenerator(Node):
             q = np.zeros(4)
             q[0], q[1], q[2], q[3] = q_tmp[3], q_tmp[0], q_tmp[1], q_tmp[2]
             pose_msg = PoseStamped()
-            pose_msg.header.frame_id = self.frame_id
+            pose_msg.header.frame_id = self.child_frame_id
             pose_msg.pose.position.x = position[0]
             pose_msg.pose.position.y = position[1]
             pose_msg.pose.position.z = position[2]
@@ -219,7 +219,7 @@ class MinSnapTrajectoryGenerator(Node):
         # publish trajectory attitude in rpy representation in degrees
         # timestamp = int(self.get_clock().now().nanoseconds / 1000)
         rpy_msg = Vector3Stamped()
-        rpy_msg.header.frame_id = self.frame_id
+        rpy_msg.header.frame_id = self.child_frame_id
         rpy_msg.vector.x = np.rad2deg(sig[0])
         rpy_msg.vector.y = np.rad2deg(sig[1])
         rpy_msg.vector.z = np.rad2deg(sig[2])
@@ -228,7 +228,7 @@ class MinSnapTrajectoryGenerator(Node):
 
     def pub_linear_twist_cmd(self, linear_vel: np.array) -> TwistStamped:
         vel_msg = TwistStamped()
-        vel_msg.header.frame_id = self.frame_id
+        vel_msg.header.frame_id = self.child_frame_id
         vel_msg.twist.linear.x = linear_vel[0]
         vel_msg.twist.linear.y = linear_vel[1]
         vel_msg.twist.linear.z = linear_vel[2]
@@ -237,7 +237,7 @@ class MinSnapTrajectoryGenerator(Node):
 
     def pub_full_twist_cmd(self, linear_vel: np.array, angular_vel: np.array) -> TwistStamped:
         vel_msg = TwistStamped()
-        vel_msg.header.frame_id = self.frame_id
+        vel_msg.header.frame_id = self.child_frame_id
         vel_msg.twist.linear.x = linear_vel[0]
         vel_msg.twist.linear.y = linear_vel[1]
         vel_msg.twist.linear.z = linear_vel[2]
@@ -250,7 +250,7 @@ class MinSnapTrajectoryGenerator(Node):
 
     def pub_linear_accel_cmd(self, linear_acc: np.array) -> AccelStamped:
         acc_msg = AccelStamped()
-        acc_msg.header.frame_id = self.frame_id
+        acc_msg.header.frame_id = self.child_frame_id
         acc_msg.accel.linear.x = linear_acc[0]
         acc_msg.accel.linear.y = linear_acc[1]
         acc_msg.accel.linear.z = linear_acc[2]
@@ -259,7 +259,7 @@ class MinSnapTrajectoryGenerator(Node):
 
     def pub_full_accel_cmd(self, linear_acc: np.array, angular_acc: np.array) -> AccelStamped:
         acc_msg = AccelStamped()
-        acc_msg.header.frame_id = self.frame_id
+        acc_msg.header.frame_id = self.child_frame_id
         acc_msg.accel.linear.x = linear_acc[0]
         acc_msg.accel.linear.y = linear_acc[1]
         acc_msg.accel.linear.z = linear_acc[2]
@@ -272,7 +272,7 @@ class MinSnapTrajectoryGenerator(Node):
 
     def pub_linear_jerk_cmd(self, linear_jerk: np.array) -> Vector3Stamped:
         msg = Vector3Stamped()
-        msg.header.frame_id = self.frame_id
+        msg.header.frame_id = self.child_frame_id
         msg.vector.x = linear_jerk[0]
         msg.vector.y = linear_jerk[1]
         msg.vector.z = linear_jerk[2]
@@ -281,7 +281,7 @@ class MinSnapTrajectoryGenerator(Node):
 
     def pub_linear_snap_cmd(self, linear_snap: np.array) -> Vector3Stamped:
         msg = Vector3Stamped()
-        msg.header.frame_id = self.frame_id
+        msg.header.frame_id = self.child_frame_id
         msg.vector.x = linear_snap[0]
         msg.vector.y = linear_snap[1]
         msg.vector.z = linear_snap[2]
@@ -297,7 +297,7 @@ class MinSnapTrajectoryGenerator(Node):
         q[2] = q_tmp[1]
         q[3] = q_tmp[2]
         msg = PoseStamped()
-        msg.header.frame_id = self.frame_id
+        msg.header.frame_id = self.child_frame_id
         msg.pose.position.x = position[0]
         msg.pose.position.y = position[1]
         msg.pose.position.z = position[2]
@@ -355,7 +355,7 @@ class MinSnapTrajectoryGenerator(Node):
 
         msg = Marker()
         msg.action = Marker.ADD
-        msg.header.frame_id = self.frame_id
+        msg.header.frame_id = self.child_frame_id
         msg.ns = "arrows"
         msg.id = id
         msg.type = Marker.LINE_LIST
