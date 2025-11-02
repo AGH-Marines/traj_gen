@@ -31,7 +31,8 @@ from traj_gen.waypoints import (flip,
                                 test_position,
                                 straight,
                                 att_test,
-                                raster_scan)
+                                raster_scan,
+                                traj_from_file)
 
 
 class MinSnapTrajectoryGenerator(Node):
@@ -69,6 +70,13 @@ class MinSnapTrajectoryGenerator(Node):
 
         self.frame_id_param = self.declare_parameter('frame_id', 'traj_gen')
         self.child_frame_id_param = self.declare_parameter('child_frame_id', 'traj_gen_node')
+        self.use_traj_from_file_param = self.declare_parameter('use_traj_from_file', False)
+        self.traj_file_dir_param = self.declare_parameter('traj_file_dir', '/home/dev/ros2_ws/src/trajectory/rov_position_snapshot/output')
+        self.traj_file_param = self.declare_parameter('traj_file', '')
+
+        self.use_traj_from_file_param = self.get_parameter('use_traj_from_file').value
+        self.traj_file_dir_param = self.get_parameter('traj_file_dir').value
+        self.traj_file_param = self.get_parameter('traj_file').value
 
         self.transform_broadcaster = TransformBroadcaster(node=Node('traj_gen_tf_broadcaster'))
 
@@ -89,7 +97,10 @@ class MinSnapTrajectoryGenerator(Node):
         self.roll_pitch_type = 'min_acc'  # None or 'min_acc'
         self.current_yaw = 0.0
         # load waypoints (xyz, yaw)
-        t_waypoints, self.xyz_waypoints, self.rpy_waypoints = figure_8()
+        t_waypoints, self.xyz_waypoints, self.rpy_waypoints = traj_from_file(self.traj_file_param, self.traj_file_dir_param) if self.use_traj_from_file_param else figure_8()
+
+        self.get_logger().info(f'{self.rpy_waypoints}')
+
         roll_waypoints = self.rpy_waypoints[:, 0]
         pitch_waypoints = self.rpy_waypoints[:, 1]
         yaw_waypoints = self.rpy_waypoints[:, 2]
