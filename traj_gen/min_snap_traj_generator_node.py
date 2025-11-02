@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -15,10 +17,9 @@ from geometry_msgs.msg import (Vector3Stamped,
                                Point,
                                TransformStamped)
 from visualization_msgs.msg import Marker
-from nav_msgs.msg import Path
+from nav_msgs.msg import Path, Odometry
 from std_msgs.msg import Float32
 from tf2_ros import TransformBroadcaster
-
 
 from traj_gen.traj_gen.min_snap_trajectory_generators import (xyzMinDerivTrajectory,
                                                               xyzMinSnapTrajectory,
@@ -38,12 +39,13 @@ class MinSnapTrajectoryGenerator(Node):
     """
     generate desired trajectory to be executed by the robot
     """
+
     def __init__(self):
         super().__init__('trajectory_generator')
 
         # setpoints publishers
         self.att_sp_rpy_pub = self.create_publisher(Vector3Stamped, '/target_att_rpy', 10)  # att in rpy degrees
-        self.pose_sp_pub = self.create_publisher(PoseStamped, '/target_pose', 10)   # pose (xyz and quaternion)
+        self.pose_sp_pub = self.create_publisher(PoseStamped, '/target_pose', 10)  # pose (xyz and quaternion)
         self.vel_sp_pub = self.create_publisher(TwistStamped, '/target_twist', 10)  # linear and angular velocity
         self.acc_sp_pub = self.create_publisher(AccelStamped, '/target_accel', 10)  # linear and angular acceleration
         self.jerk_sp_pub = self.create_publisher(Vector3Stamped, '/target_jerk', 10)  # linear jerk
@@ -58,6 +60,7 @@ class MinSnapTrajectoryGenerator(Node):
             history=HistoryPolicy.KEEP_LAST, depth=1)
         self.att_rpy_sub = self.create_subscription(Vector3Stamped, '/att_rpy', self.rpy_callback, qos_profile)
         self.position_sub = self.create_subscription(Vector3Stamped, '/position', self.position_callback, qos_profile)
+        self.odometry = self.create_subscription(Odometry, '/bluerov2/odometry', self.odometry_callback, 10)
         self.cur_position = np.array([0.0, 0.0, 0.0])
         self.cur_rpy = np.array([0.0, 0.0, 0.0])
 
@@ -69,6 +72,7 @@ class MinSnapTrajectoryGenerator(Node):
 
         self.frame_id_param = self.declare_parameter('frame_id', 'traj_gen')
         self.child_frame_id_param = self.declare_parameter('child_frame_id', 'traj_gen_node')
+        self.declare_parameter('reference_frame', 'world_ned')
 
         self.transform_broadcaster = TransformBroadcaster(node=Node('traj_gen_tf_broadcaster'))
 
@@ -81,7 +85,9 @@ class MinSnapTrajectoryGenerator(Node):
         self.trail_size = 1000  # maximum history to keep
         self.vel_heads = []
         self.vel_tails = []
-
+        self.cur_odometry_position = np.array([0.0, 0.0, 0.0])
+        self.cur_odometry_rotation = np.array([0.0, 0.0, 0.0, 0.0])
+        self.next_point_treshold = 2.5
         # ================ choose which trajectory to use ========================
         # TODO use rqt_reconfigure to choose trajectory and ensure smooth transitions
         self.traj_type = 'min_snap'
@@ -129,9 +135,9 @@ class MinSnapTrajectoryGenerator(Node):
                                                 vel=None,
                                                 calc_times=False,
                                                 method='lstsq')
-            print(f"{self.xyz_gen.coeffs[:,0].round(3)}")
-            print(f"{self.xyz_gen.coeffs[:,1].round(3)}")
-            print(f"{self.xyz_gen.coeffs[:,2].round(3)}")
+            print(f"{self.xyz_gen.coeffs[:, 0].round(3)}")
+            print(f"{self.xyz_gen.coeffs[:, 1].round(3)}")
+            print(f"{self.xyz_gen.coeffs[:, 2].round(3)}")
 
         elif self.traj_type == 'optimize_traj':
             # 'end-derivative' 'poly-coeff'
@@ -172,8 +178,10 @@ class MinSnapTrajectoryGenerator(Node):
             self.waypoints_pub.publish(waypoints_msgs)
 
     def update_callback(self) -> None:
+        print("TEST2", self.cur_odometry_rotation, self.cur_odometry_position, flush=True)
         """Callback function for the timer that runs the trajectory update at desired rate"""
-        t = (self.get_clock().now().nanoseconds - self.start_time) / 1000_000_000.0  # time since the beginning in seconds
+        t = (
+                    self.get_clock().now().nanoseconds - self.start_time) / 1000_000_000.0  # time since the beginning in seconds
         dt = (t - self.prev_time)  # time since last update
         self.prev_time = t
 
@@ -182,7 +190,9 @@ class MinSnapTrajectoryGenerator(Node):
 
         if self.traj_type == 'min_snap' or self.traj_type == 'min_snap2' or self.traj_type == 'optimize_traj':
             # update translational motion
-            position, vel, acc, jerk, snap = self.xyz_gen.eval(t)
+            position, vel, acc, jerk, snap = self.xyz_gen.eval(t, position=self.cur_odometry_position,
+                                                               rotation=self.cur_odometry_rotation,
+                                                               treshhold=self.next_point_treshold)
             # update rotational motions
             des_yaw, _, _ = self.yaw_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
             if self.roll_gen is not None and self.pitch_gen is not None:
@@ -214,6 +224,14 @@ class MinSnapTrajectoryGenerator(Node):
 
     def position_callback(self, msg: Vector3Stamped) -> None:
         self.cur_position = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
+
+    def odometry_callback(self, msg: Odometry) -> None:
+        print("REFERENCE", self.reference_frame)
+        self.cur_odometry_position = np.array(
+            [msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        self.cur_odometry_rotation = np.array(
+            [msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z,
+             msg.pose.pose.orientation.w])
 
     def pub_rpy_cmd(self, sig: np.array) -> Vector3Stamped:
         # publish trajectory attitude in rpy representation in degrees
@@ -427,6 +445,10 @@ class MinSnapTrajectoryGenerator(Node):
     @property
     def child_frame_id(self) -> str:
         return self.get_parameter('child_frame_id').value
+
+    @property
+    def reference_frame(self) -> str:
+        return self.get_parameter('reference_frame').value
 
 
 def main(args=None):
