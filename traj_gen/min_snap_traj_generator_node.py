@@ -1,8 +1,10 @@
 import logging
 
+from rclpy.time import Time
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+import ros2_numpy as rnp
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (QoSProfile,
@@ -16,11 +18,11 @@ from geometry_msgs.msg import (Vector3Stamped,
                                AccelStamped,
                                Point,
                                TransformStamped)
+from traj_gen_interfaces.srv import AddPoint
 from visualization_msgs.msg import Marker
 from nav_msgs.msg import Path, Odometry
 from std_msgs.msg import Float32
-from tf2_ros import TransformBroadcaster
-
+from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster, TransformBroadcaster
 from traj_gen.traj_gen.min_snap_trajectory_generators import (xyzMinDerivTrajectory,
                                                               xyzMinSnapTrajectory,
                                                               optimizeTrajectory,
@@ -43,6 +45,8 @@ class MinSnapTrajectoryGenerator(Node):
     def __init__(self):
         super().__init__('trajectory_generator')
 
+        self.point_service = self.create_service(AddPoint, "add_point", self.add_point_callback)
+
         # setpoints publishers
         self.att_sp_rpy_pub = self.create_publisher(Vector3Stamped, '/target_att_rpy', 10)  # att in rpy degrees
         self.pose_sp_pub = self.create_publisher(PoseStamped, '/target_pose', 10)  # pose (xyz and quaternion)
@@ -51,6 +55,8 @@ class MinSnapTrajectoryGenerator(Node):
         self.jerk_sp_pub = self.create_publisher(Vector3Stamped, '/target_jerk', 10)  # linear jerk
         self.snap_sp_pub = self.create_publisher(Vector3Stamped, '/target_snap', 10)  # linear snap
         self.force_sp_pub = self.create_publisher(Float32, '/target_force', 10)
+        self.pos = [0, 0, 0]
+        self.pos_target = [0, 0, 0]
         # self.wrench_sp_pub = self.create_publisher(WrenchStamped,'/target_wrench', 10)
 
         # state subscribers (used by some traj generators such as yaw follower)
@@ -72,7 +78,10 @@ class MinSnapTrajectoryGenerator(Node):
 
         self.frame_id_param = self.declare_parameter('frame_id', 'traj_gen')
         self.child_frame_id_param = self.declare_parameter('child_frame_id', 'traj_gen_node')
+        self.declare_parameter('odom_frame', 'base_link')
+        self.declare_parameter('target_frame', 'traj_gen_node')
         self.declare_parameter('reference_frame', 'world_ned')
+        self.declare_parameter('hz', 120)
 
         self.transform_broadcaster = TransformBroadcaster(node=Node('traj_gen_tf_broadcaster'))
 
@@ -87,7 +96,13 @@ class MinSnapTrajectoryGenerator(Node):
         self.vel_tails = []
         self.cur_odometry_position = np.array([0.0, 0.0, 0.0])
         self.cur_odometry_rotation = np.array([0.0, 0.0, 0.0, 0.0])
-        self.next_point_treshold = 2.5
+        self.next_point_treshold = 0.2
+        self.tf_buffer = Buffer()
+        self.tf_broadcaster = StaticTransformBroadcaster(self)
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.odom_clock = self.create_timer(1 / self.hz, self.cb_odom_frame)
+
+        self.target_clock = self.create_timer(1 / self.hz, self.cb_target_frame)
         # ================ choose which trajectory to use ========================
         # TODO use rqt_reconfigure to choose trajectory and ensure smooth transitions
         self.traj_type = 'min_snap'
@@ -177,8 +192,55 @@ class MinSnapTrajectoryGenerator(Node):
             waypoints_msgs.poses.append(pose_msg)
             self.waypoints_pub.publish(waypoints_msgs)
 
+    def add_point_callback(self, req, res):
+        print("Add point callback")
+        print(req, flush=True)
+        self.xyz_gen.add_point(req.x, req.y, req.z)
+        res.success = True
+        return res
+
+    def cb_odom_frame(self) -> None:
+        now = Time()
+        try:
+            t = self.tf_buffer.lookup_transform(self.odom_frame, self.reference_frame, now)
+        except Exception as e:
+            self.get_logger().error(f"{e}")
+            return
+        transform = rnp.numpify(t.transform)
+        pos_from_tf = transform[:3, 3]
+        print("pos_from_tf", pos_from_tf)
+        self.pos = pos_from_tf
+
+    def cb_target_frame(self) -> None:
+        now = Time()
+        try:
+            t = self.tf_buffer.lookup_transform(self.target_frame, self.reference_frame, now)
+        except Exception as e:
+            self.get_logger().error(f"{e}")
+            return
+        transform = rnp.numpify(t.transform)
+        pos_from_tf = transform[:3, 3]
+        print("pos_from_tf", pos_from_tf)
+        self.pos_target = pos_from_tf
+
+    @property
+    def hz(self) -> int:
+        return self.get_parameter('hz').value
+
+    @property
+    def odom_frame(self) -> str:
+        return self.get_parameter('odom_frame').value
+
+    @property
+    def target_frame(self) -> str:
+        return self.get_parameter('target_frame').value
+
+    @property
+    def reference_frame(self) -> str:
+        return self.get_parameter('reference_frame').value
+
     def update_callback(self) -> None:
-        print("TEST2", self.cur_odometry_rotation, self.cur_odometry_position, flush=True)
+        # print("TEST2", self.cur_odometry_rotation, self.cur_odometry_position, flush=True)
         """Callback function for the timer that runs the trajectory update at desired rate"""
         t = (
                     self.get_clock().now().nanoseconds - self.start_time) / 1000_000_000.0  # time since the beginning in seconds
@@ -190,20 +252,21 @@ class MinSnapTrajectoryGenerator(Node):
 
         if self.traj_type == 'min_snap' or self.traj_type == 'min_snap2' or self.traj_type == 'optimize_traj':
             # update translational motion
-            position, vel, acc, jerk, snap = self.xyz_gen.eval(t, position=self.cur_odometry_position,
+            position, vel, acc, jerk, snap = self.xyz_gen.eval(t, position=np.array(self.pos),
+                                                               pos_target=np.array(self.pos_target),
                                                                rotation=self.cur_odometry_rotation,
                                                                treshhold=self.next_point_treshold)
             # update rotational motions
-            des_yaw, _, _ = self.yaw_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
-            if self.roll_gen is not None and self.pitch_gen is not None:
-                des_roll, _, _ = self.roll_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
-                des_pitch, _, _ = self.pitch_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
-            else:
-                des_roll = 0.0
-                des_pitch = 0.0
-            att_rpy = np.array([des_roll, des_pitch, des_yaw])
-            self.get_logger().info(f"publishing commands: att={att_rpy.round(3)}, position={position.round(3)}",
-                                   throttle_duration_sec=0.5)
+            # des_yaw, _, _ = self.yaw_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
+            # if self.roll_gen is not None and self.pitch_gen is not None:
+            #     des_roll, _, _ = self.roll_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
+            #     des_pitch, _, _ = self.pitch_gen.eval(t, des_pos=position, curr_pos=self.cur_position)
+            # else:
+            #     des_roll = 0.0
+            #     des_pitch = 0.0
+            att_rpy = np.array([0, 0, 0])
+            # self.get_logger().info(f"publishing commands: att={att_rpy.round(3)}, position={position.round(3)}",
+            #                        throttle_duration_sec=0.5)
             self.pub_pose_cmd(position, att_rpy)
             self.pub_transform_broadcaster(position, att_rpy)
             self.pub_rpy_cmd(att_rpy)
@@ -226,7 +289,6 @@ class MinSnapTrajectoryGenerator(Node):
         self.cur_position = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
 
     def odometry_callback(self, msg: Odometry) -> None:
-        print("REFERENCE", self.reference_frame)
         self.cur_odometry_position = np.array(
             [msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
         self.cur_odometry_rotation = np.array(

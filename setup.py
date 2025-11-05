@@ -25,6 +25,7 @@ setup(
         'console_scripts': [
             'min_snap_traj_generator = traj_gen.min_snap_traj_generator_node:main',
             'ana_traj_generator = traj_gen.ana_traj_generator_node:main',
+            'add_point = traj_gen.temp_client:main',
         ],
     },
 )

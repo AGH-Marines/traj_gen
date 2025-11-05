@@ -189,7 +189,12 @@ class xyzMinDerivTrajectory:
         self.des_snap = np.array(
             [self.coeff_x[start:end].dot(t4), self.coeff_y[start:end].dot(t4), self.coeff_z[start:end].dot(t4)])
 
-    def eval(self, tp: float, position: np.ndarray, rotation: np.ndarray, treshhold: float) -> Tuple[
+    def add_point(self, x, y, z):
+        print(self.wps, flush=True)
+        self.wps = np.concatenate((self.wps, [[x, y, z]]), axis=0)
+        print(self.wps, flush=True)
+
+    def eval(self, tp: float, position: np.ndarray,pos_target:np.array, rotation: np.ndarray, treshhold: float) -> Tuple[
         np.array, float, np.array, np.array, np.array, np.array]:
         """Return the trajectory values at time t. This function returns a tuple containing xyz position and its derivatives up to snap and yaw value.
 
@@ -224,9 +229,9 @@ class xyzMinDerivTrajectory:
         #     # find which time segment we are at
         self.des_pos = self.wps[self.t_idx, :]
 
-        print(t, self.t_idx, self.des_pos, self.des_vel, self.des_acc, self.des_jerk)
+        # print(t, self.t_idx, self.des_pos, self.des_vel, self.des_acc, self.des_jerk)
         print(self.des_pos, position, self.des_pos - position, np.linalg.norm(self.des_pos - position))
-        if np.linalg.norm(self.des_pos - position) < treshhold:
+        if np.linalg.norm(pos_target - position) < treshhold:
             print("THRESHHOLD")
             self.t_idx = (self.t_idx + 1) % len(self.wps)
             self.des_pos = self.wps[self.t_idx, :]
@@ -243,6 +248,7 @@ class xyzMinDerivTrajectory:
         #     self.pos_waypoint_min(t)
 
         return self.des_pos[:], self.des_vel[:], self.des_acc[:], self.des_jerk[:], self.des_snap[:]
+
 
 
 class xyzMinSnapTrajectory:
